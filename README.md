@@ -1,0 +1,1 @@
+# git-only-auto-commit
