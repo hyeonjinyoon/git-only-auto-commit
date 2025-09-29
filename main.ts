@@ -1,38 +1,146 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import {
+	App,
+	FileSystemAdapter,
+	Notice,
+	Plugin,
+	PluginSettingTab,
+	Setting
+} from 'obsidian';
+
+import { exec } from 'child_process';
 
 interface GitOnlyAutoCommitPluginSettings {
-	mySetting: string;
+	intervalMinutes: number;
 }
 
 const DEFAULT_SETTINGS: GitOnlyAutoCommitPluginSettings = {
-	mySetting: 'default'
+	intervalMinutes: 5
 }
 
 export default class GitOnlyAutoCommitPlugin extends Plugin {
 	settings: GitOnlyAutoCommitPluginSettings;
 
+	private isRunning = false;
+	private autoIntervalHandle: number | null = null;
+
 	async onload() {
 		await this.loadSettings();
 
-		this.addRibbonIcon('dice', 'Greet', () => {
-			new Notice('Hello, world!');
+		this.addRibbonIcon('git-branch', 'Git: Commit & Push', async () => {
+			this.commitAndPush().catch(() => { });
 		});
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
+		this.addSettingTab(new GitOnlyAutoCommitSettingTab(this.app, this));
+		this.reschedule();
+		this.commitAndPush().catch(() => { });
+	}
 
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
+	public reschedule() {
+		if (this.autoIntervalHandle != null) {
+			window.clearInterval(this.autoIntervalHandle);
+			this.autoIntervalHandle = null;
+		}
+
+		const minutes = Number(this.settings.intervalMinutes);
+		if (!isFinite(minutes) || minutes <= 0) {
+			return;
+		}
+
+		const ms = Math.max(10_000, Math.round(minutes * 60 * 1000));
+		this.autoIntervalHandle = window.setInterval(() => {
+			if (!this.isRunning) {
+				this.commitAndPush().catch(() => { });
+			}
+		}, ms);
+
+		this.registerInterval(this.autoIntervalHandle);
+	}
+
+	private async commitAndPush() {
+		if (this.isRunning) {
+			new Notice('only commit: already running');
+			return;
+		}
+		this.isRunning = true;
+
+		try {
+			const cwd = this.getVaultPath();
+			if (!cwd) {
+				new Notice('Available on desktop only');
+				return;
+			}
+
+			await this.run('git rev-parse --is-inside-work-tree', cwd);
+
+			const msg = this.buildCommitMessage();
+
+			await this.run('git add -A', cwd);
+
+			try {
+				await this.run(`git commit -m "${msg.replace(/"/g, '\\"')}"`, cwd);
+			} catch (e: any) {
+				const stdout = (e?.stdout ?? '').toString();
+				const stderr = (e?.stderr ?? '').toString();
+				const msg = (stderr || stdout || e?.message || String(e)).trim();
+				if (!/nothing to commit/i.test(String(msg))) {
+					throw e;
+				}
+			}
+			
+			await this.run('git push', cwd);
+
+			new Notice('git auto commit complete');
+		} catch (e: any) {
+			const code = typeof e?.code === 'number' ? e.code : -1;
+			const stdout = (e?.stdout ?? '').toString();
+			const stderr = (e?.stderr ?? '').toString();
+			const msg = (stderr || stdout || e?.message || String(e)).trim();
+			new Notice('only commit: Error\n' + msg.slice(0, 400));
+			console.error('[GitAutoCommitOnly]', e);
+		} finally {
+			this.isRunning = false;
+		}
+	}
+
+	private buildCommitMessage() {
+		const d = new Date();
+		const MM = d.getMonth() + 1;
+		const DD = d.getDate();
+		const YYYY = d.getFullYear();
+		const hh = d.getHours();
+		const mm = d.getMinutes().toString().padStart(2, '0');
+		return `auto commit at ${MM}-${DD}-${YYYY} ${hh}:${mm}`;
+	}
+
+	private run(command: string, cwd: string): Promise<{ stdout: string; stderr: string }> {
+		return new Promise((resolve, reject) => {
+			exec(
+				command,
+				{
+					cwd,
+					windowsHide: true,
+					env: process.env
+				},
+				(error, stdout, stderr) => {
+					if (error) {
+						reject({ error, stdout, stderr });
+					} else {
+						resolve({ stdout, stderr });
+					}
+				}
+			);
 		});
+	}
 
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
+	private getVaultPath(): string | null {
+		const adapter = this.app.vault.adapter;
+		if (adapter instanceof FileSystemAdapter) {
+			return adapter.getBasePath();
+		}
+		return null;
 	}
 
 	onunload() {
-
 	}
 
 	async loadSettings() {
@@ -44,7 +152,7 @@ export default class GitOnlyAutoCommitPlugin extends Plugin {
 	}
 }
 
-class SampleSettingTab extends PluginSettingTab {
+class GitOnlyAutoCommitSettingTab extends PluginSettingTab {
 	plugin: GitOnlyAutoCommitPlugin;
 
 	constructor(app: App, plugin: GitOnlyAutoCommitPlugin) {
@@ -53,19 +161,27 @@ class SampleSettingTab extends PluginSettingTab {
 	}
 
 	display(): void {
-		const {containerEl} = this;
-
+		const { containerEl } = this;
 		containerEl.empty();
 
 		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
-				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
-					await this.plugin.saveSettings();
-				}));
+			.setName('Interval (Minutes)')
+			.setDesc('Auto-commit interval in minutes. Decimals allowed. Set 0 to disable.')
+			.addText((text) => {
+				text
+					.setPlaceholder('e.g., 5 or 2.5')
+					.setValue(String(this.plugin.settings.intervalMinutes))
+					.onChange(async (value) => {
+						const n = parseFloat(value);
+						this.plugin.settings.intervalMinutes = isFinite(n) && n >= 0 ? n : 0;
+						await this.plugin.saveSettings();
+						this.plugin.reschedule();
+					});
+
+				const input = text.inputEl as HTMLInputElement;
+				input.type = 'number';
+				input.step = '0.1';
+				input.min = '0';
+			});
 	}
 }

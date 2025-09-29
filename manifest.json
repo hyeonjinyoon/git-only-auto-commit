@@ -1,11 +1,10 @@
 {
-	"id": "git-only-auto-commit",
-	"name": "Git Only Auto Commit",
+	"id": "git-auto-commit-only",
+	"name": "Git Auto Commit Only",
 	"version": "1.0.0",
 	"minAppVersion": "0.15.0",
-	"description": "Demonstrates some of the capabilities of the Obsidian API.",
-	"author": "Obsidian",
-	"authorUrl": "https://obsidian.md",
-	"fundingUrl": "https://obsidian.md/pricing",
+	"description": "Performs only Git commit and push automatically.",
+	"author": "Hyeonjin Yoon",
+	"authorUrl": "https://github.com/hyeonjinyoon",
 	"isDesktopOnly": true
 }
